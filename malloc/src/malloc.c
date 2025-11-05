@@ -1,11 +1,13 @@
-#include <pthread.h> // Pour les mutex
+#include <pthread.h>
 #include <stddef.h>
-#include <string.h> // Pour memset
-#include <sys/mman.h> // Pour mmap, munmap
-#include <unistd.h> // Pour sysconf, mmap, munmap
-// Définition de l'alignement (pour long double, généralement 16 octets)
+#include <stdint.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
 #define ALIGNMENT 16
-// Structure pour un bloc de mémoire
+#define PAGE_SIZE 4096
+
 typedef struct block
 {
     size_t size; // Taille du bloc utilisateur (alignée)
@@ -14,16 +16,68 @@ typedef struct block
     void *data; // Pointeur vers le début du bloc utilisateur (optionnel, pour
                 // faciliter)
 } block_t;
-// Variable globale : tête de la liste des blocs
+
 static block_t *head = NULL;
-// Mutex pour la sécurité des threads (initialisé plus tard)
+
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-// Fonction auxiliaire pour aligner une taille
+
 static size_t align_size(size_t size)
 {
-    return (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    size_t r = size % ALIGNMENT;
+
+    if (r == 0)
+    {
+        return size;
+    }
+    size_t padding = ALIGNMENT - r;
+    return size + padding;
 }
-// Fonction auxiliaire pour trouver un bloc libre suffisant (premier ajustement)
+
+static size_t get_page_size(size_t size)
+{
+    // Taille totale nécessaire (métadonnées + taille utilisateur alignée)
+    size_t required = align_size(size) + sizeof(block_t); // peut être modifier si on reutilise pas align_size
+
+    if (required > PAGE_SIZE)
+    {
+        size_t r = size % PAGE_SIZE;
+
+        if (r == 0)
+        {
+            return size;
+        }
+
+        size_t padding = PAGE_SIZE - r;
+
+        return size + padding;
+    }
+
+    return PAGE_SIZE;
+}
+
+static block_t *allocate_new_page(size_t size)
+{
+    size_t alloc_size = get_page_size(size);
+
+    void *page_addr = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1 ,0);
+
+    if (page_addr == MAP_FAILED) {
+        return NULL;
+    }
+
+    // Initialiser la structure de métadonnées
+    block_t *new_block = (block_t *)page_addr;
+    new_block->size = alloc_size - sizeof(block_t);
+    new_block->free = 0;
+    new_block->data = (void *)(new_block + 1);
+
+    new_block->next = head;
+    head = new_block;
+
+    // NOTE: Le splitting (division) devrait se faire dans malloc ici pour optimiser l'espace de la nouvelle page.
+    return new_block;
+}
+
 static block_t *find_free_block(size_t size)
 {
     block_t *current = head;
@@ -33,112 +87,112 @@ static block_t *find_free_block(size_t size)
         {
             return current;
         }
+        current = current->next;
+    }
+    return NULL;
+}
 
-        __attribute__((visibility("default"))) void *malloc(size_t size)
+__attribute__((visibility("default"))) void *malloc(size_t size)
+{
+    if (size == 0)
+        return NULL;
+
+    pthread_mutex_lock(&mutex);
+
+    size_t aligned_size = align_size(size);
+    block_t *block = find_free_block(aligned_size);
+    if (!block)
+    {
+        block = allocate_new_page(aligned_size);
+        if (!block)
         {
-            if (size == 0)
-                return NULL; // Selon la man page, malloc(0) peut retourner NULL
-                             // ou un pointeur valide
-            pthread_mutex_lock(
-                &mutex); // Protège l'accès (ajouté pour les threads)
-            size_t aligned_size = align_size(size);
-            block_t *block = find_free_block(aligned_size);
-            if (!block)
-            {
-                block = allocate_new_page(aligned_size);
-                if (!block)
-                {
-                    pthread_mutex_unlock(&mutex);
-                    return NULL;
-                }
-            }
-            else
-            {
-                block->free = 0; // Marquer comme occupé
-                // Optionnel : diviser le bloc si trop grand (pour optimiser,
-                // mais commencez simple)
-            }
             pthread_mutex_unlock(&mutex);
-            return block->data;
+            return NULL;
         }
+    }
+    else
+    {
+        block->free = 0; // optimisation ?
+    }
+    pthread_mutex_unlock(&mutex);
+    return block->data;
+}
 
-        __attribute__((visibility("default"))) void free(void *ptr)
-        {
-            if (!ptr)
-                return; // free(NULL) ne fait rien
-            pthread_mutex_lock(&mutex);
-            block_t *current = head;
-            while (current)
-            {
-                if (current->data == ptr)
-                {
-                    current->free = 1; // Marquer comme libre
-                    // Fusionner avec les blocs adjacents si possible (optionnel
-                    // pour l'instant) Si toute la page est libre, munmap
-                    // (avancé)
-                    break;
-                }
-                current = current->next;
-            }
-            pthread_mutex_unlock(&mutex);
-        }
+__attribute__((visibility("default"))) void free(void *ptr)
+{
+    if (!ptr)
+        return;
 
-        __attribute__((visibility("default"))) void *realloc(void *ptr,
-                                                             size_t size)
-        {
-            if (!ptr)
-                return malloc(size); // realloc(NULL, size) == malloc(size)
-            if (size == 0)
-            {
-                free(ptr);
-                return NULL; // realloc(ptr, 0) libère et retourne NULL
-            }
-            pthread_mutex_lock(&mutex);
-            // Trouver le bloc actuel
-            block_t *current = head;
-            while (current && current->data != ptr)
-            {
-                current = current->next;
-            }
-            if (!current)
-            {
-                pthread_mutex_unlock(&mutex);
-                return NULL; // Pointeur invalide
-            }
-            if (size <= current->size)
-            {
-                // Réduire la taille (optionnel : diviser le bloc)
-                current->size = align_size(size);
-                pthread_mutex_unlock(&mutex);
-                return ptr;
-            }
-            else
-            {
-                // Agrandir : allouer un nouveau bloc, copier, libérer l'ancien
-                void *new_ptr = malloc(size);
-                if (new_ptr)
-                {
-                    memcpy(new_ptr, ptr, current->size); // Copier les données
-                    free(ptr);
-                }
-                pthread_mutex_unlock(&mutex);
-                return new_ptr;
-            }
-        }
+    pthread_mutex_lock(&mutex);
+    block_t *current = head;
 
-        __attribute__((visibility("default"))) void *calloc(size_t nmemb,
-                                                            size_t size)
+    while (current)
+    {
+        if (current->data == ptr)
         {
-            if (nmemb == 0 || size == 0)
-                return NULL;
-            // Vérifier l'overflow : nmemb * size ne doit pas dépasser SIZE_MAX
-            if (size > SIZE_MAX / nmemb)
-                return NULL;
-            size_t total_size = nmemb * size;
-            void *ptr = malloc(total_size);
-            if (ptr)
-            {
-                memset(ptr, 0, total_size); // Initialiser à zéro
-            }
-            return ptr;
+            current->free = 1; // optimisation ? fusion des blocs adjacents libres 
+            break;
         }
+        current = current->next;
+    }
+    pthread_mutex_unlock(&mutex);
+}
+
+__attribute__((visibility("default"))) void *realloc(void *ptr, size_t size)
+{
+    if (!ptr)
+        return malloc(size);
+    if (size == 0)
+    {
+        free(ptr);
+        return NULL;
+    }
+    pthread_mutex_lock(&mutex);
+
+    block_t *current = head;
+    while (current && current->data != ptr)
+    {
+        current = current->next;
+    }
+    if (!current)
+    {
+        pthread_mutex_unlock(&mutex);
+        return NULL;
+    }
+    if (size <= current->size)
+    {
+        current->size = align_size(size);
+        pthread_mutex_unlock(&mutex);
+        return ptr;
+    }
+    else
+    {
+        void *new_ptr = malloc(size);
+        if (new_ptr)
+        {
+            memcpy(new_ptr, ptr, current->size);
+            free(ptr);
+        }
+        pthread_mutex_unlock(&mutex);
+        return new_ptr;
+    }
+}
+
+__attribute__((visibility("default"))) void *calloc(size_t nmemb, size_t size)
+{
+    if (nmemb == 0 || size == 0)
+        return NULL;
+
+    if (size > SIZE_MAX / nmemb)
+        return NULL;
+
+    size_t total_size = nmemb * size;
+
+    void *ptr = malloc(total_size);
+
+    if (ptr)
+    {
+        memset(ptr, 0, total_size);
+    }
+    return ptr;
+}
