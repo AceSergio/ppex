@@ -18,7 +18,7 @@ $(SRC_DIR)/%.o: $(SRC_DIR)/%.c
 
 $(TARGET): $(OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^
-	mv $(TARGET) tests/
+
 
 
 $(TEST_EXEC): $(TEST_SRC)
@@ -44,7 +44,7 @@ check: $(TARGET) $(TEST_EXEC)
 
 
 clean:
-	rm -f $(OBJ) tests/$(TARGET) $(TEST_EXEC)
+	rm -f $(OBJ) $(TARGET) $(TEST_EXEC)
 
 
 debug: CFLAGS += -g
