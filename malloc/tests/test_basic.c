@@ -1,5 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
+#include "test_utils.h"
 int main()
 {
     void *p = malloc(100);

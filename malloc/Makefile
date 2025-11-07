@@ -1,60 +1,50 @@
 CC = gcc
-CFLAGS = -std=c99 -pedantic -Werror -Wall -Wextra -Wvla -fvisibility=hidden -fPIC -pthread
-LDFLAGS = -shared
+CPPFLAGS = -D_DEFAULT_SOURCE
 
-SRC_DIR = src
+CFLAGS = -std=c99 -pedantic -Werror -Wall -Wextra -Wvla -fvisibility=hidden -fPIC
+LDFLAGS = -shared -Wl,--no-undefined
 
-SRC = $(SRC_DIR)/malloc.c
+SRC = src/malloc.c
 OBJ = $(SRC:.c=.o) 
 
 TARGET = libmalloc.so
-TEST_SRC = $(SRC_DIR)/test.c
-TEST_EXEC = test_basic
+TEST_SRC = tests/test.c tests/test_fragmentation.c
+TEST_EXEC = test_basic test_fragmentation
 
 
-$(SRC_DIR)/%.o: $(SRC_DIR)/%.c
-	$(CC) $(CFLAGS) -c $< -o $@
+$(SRC_DIR)/%.o: src/%.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 
-$(TARGET): $(OBJ)
-	$(CC) $(LDFLAGS) -o $@ $^
+library: $(OBJ)
+	$(CC) $(LDFLAGS) -o $(TARGET) $^
 
 
 
-$(TEST_EXEC): $(TEST_SRC)
-	$(CC) $(CFLAGS) $< -o $@
+test_%: tests/test_%.c 
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< -o $@
 
 
-check: $(TARGET) $(TEST_EXEC)
+check: library $(TEST_EXEC)
 	@echo "--- Lancement des tests ---"
-	@echo "Test simple avec $(TEST_EXEC) :"
-	# Utilise LD_PRELOAD pour forcer l'utilisation de votre libmalloc.so
-	LD_PRELOAD=./$(TARGET) ./$(TEST_EXEC)
+	@echo "Test simple avec (malloc/free) :"
+	LD_PRELOAD=./$(TARGET) ./test_basic
+	@echo "---------------------------"
+	@echo "Test de fragmentation :"
+	LD_PRELOAD=./$(TARGET) ./test_fragmentation
+	@echo "---------------------------"
 	@echo "Test simple avec ls :"
-	LD_PRELOAD=./$(TARGET) ls
+	LD_PRELOAD=./$(TARGET) ls > /dev/null && echo "ls fonctionne"
+	@echo "---------------------------"
 	@echo "Test avec cat Makefile :"
-	LD_PRELOAD=./$(TARGET) cat Makefile
-	@echo "Lancement des tests avancés (si les binaires existent) :"
-	# CORRECTION : Le chemin est maintenant ./tests/speed
-	-./tests/speed
-	# CORRECTION : Le chemin est maintenant ./tests/corruptionproof
-	-./tests/corruptionproof
-	# CORRECTION : Le chemin est maintenant ./tests/memoryfootprint
-	-./tests/memoryfootprint
-
+	LD_PRELOAD=./$(TARGET) cat Makefile > /dev/null && echo "cat fonctionne"
+	@echo "---------------------------"
 
 clean:
 	rm -f $(OBJ) $(TARGET) $(TEST_EXEC)
 
 
-debug: CFLAGS += -g
-debug: $(TARGET) $(TEST_EXEC)
-	@echo "Compilation en mode debug terminée."
-	@echo "Pour déboguer : gdb --args env LD_PRELOAD=./$(TARGET) ./$(TEST_EXEC)"
-	# Exemple : gdb --args env LD_PRELOAD=./$(TARGET) ls
-
-
-all: $(TARGET) $(TEST_EXEC)
+all: library $(TEST_EXEC)
 
 
 $(OBJ): $(SRC)

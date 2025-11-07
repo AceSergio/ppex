@@ -1,3 +1,5 @@
+#include "malloc.h"
+
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -10,11 +12,11 @@
 
 typedef struct block
 {
-    size_t size; // Taille du bloc utilisateur (alignée)
+    size_t size;
     int free; // 1 si libre, 0 si occupé
-    struct block *next; // Pointeur vers le prochain bloc dans la liste
-    void *data; // Pointeur vers le début du bloc utilisateur (optionnel, pour
-                // faciliter)
+    struct block *next;
+    void *data;
+
 } block_t;
 
 static block_t *head = NULL;
@@ -35,8 +37,7 @@ static size_t align_size(size_t size)
 
 static size_t get_page_size(size_t size)
 {
-    // Taille totale nécessaire (métadonnées + taille utilisateur alignée)
-    size_t required = align_size(size) + sizeof(block_t); // peut être modifier si on reutilise pas align_size
+    size_t required = align_size(size) + sizeof(block_t);
 
     if (required > PAGE_SIZE)
     {
@@ -59,13 +60,14 @@ static block_t *allocate_new_page(size_t size)
 {
     size_t alloc_size = get_page_size(size);
 
-    void *page_addr = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1 ,0);
+    void *page_addr = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
-    if (page_addr == MAP_FAILED) {
+    if (page_addr == MAP_FAILED)
+    {
         return NULL;
     }
 
-    // Initialiser la structure de métadonnées
     block_t *new_block = (block_t *)page_addr;
     new_block->size = alloc_size - sizeof(block_t);
     new_block->free = 0;
@@ -74,7 +76,6 @@ static block_t *allocate_new_page(size_t size)
     new_block->next = head;
     head = new_block;
 
-    // NOTE: Le splitting (division) devrait se faire dans malloc ici pour optimiser l'espace de la nouvelle page.
     return new_block;
 }
 
@@ -130,7 +131,8 @@ __attribute__((visibility("default"))) void free(void *ptr)
     {
         if (current->data == ptr)
         {
-            current->free = 1; // optimisation ? fusion des blocs adjacents libres 
+            current->free =
+                1; // optimisation ? fusion des blocs adjacents libres
             break;
         }
         current = current->next;
