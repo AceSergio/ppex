@@ -113,7 +113,18 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
     }
     else
     {
-        block->free = 0; // optimisation ?
+        if (block->size >= aligned_size + sizeof(block_t) + ALIGNMENT)
+        {
+            block_t *new_free_block = block->data + aligned_size;
+            new_free_block->size = block->size - aligned_size - sizeof(block_t);
+            new_free_block->free = 1;
+            new_free_block->next = block->next;
+            new_free_block->data = (new_free_block + 1);
+
+            block->size = aligned_size;
+            block->next = new_free_block;
+        }
+        block->free = 0;
     }
     pthread_mutex_unlock(&mutex);
     return block->data;
